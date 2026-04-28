@@ -1,18 +1,14 @@
 const sqlite3 = require('sqlite3').verbose();
 
-// 1. Establish connection to the database file. 
-// If the file does not exist, SQLite will create it automatically.
 const db = new sqlite3.Database('./warehouse_management.db', (err) => {
     if (err) {
-        console.error("Engineering Error: Could not connect to database.", err.message);
+        console.error("Could not connect to database.", err.message);
     } else {
-        console.log("Connected to the SQLite persistence layer.");
+        console.log("Connected to SQLite.");
     }
 });
 
 db.serialize(() => {
-    // 2. Define the Inventory Table
-    // We use INTEGER for 'id' to map directly to our 32-bit shift register logic.
     db.run(`CREATE TABLE IF NOT EXISTS inventory (
         id INTEGER PRIMARY KEY,
         sku TEXT UNIQUE,
@@ -21,8 +17,6 @@ db.serialize(() => {
         min_threshold INTEGER DEFAULT 5
     )`);
 
-    // 3. Define the Transaction Log
-    // This allows for historical auditing of all "Pick" and "Put" events.
     db.run(`CREATE TABLE IF NOT EXISTS transactions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         inventory_id INTEGER,
@@ -32,21 +26,26 @@ db.serialize(() => {
         FOREIGN KEY (inventory_id) REFERENCES inventory(id)
     )`);
 
-    // 4. Seed the Database
-    // We pre-allocate 32 rows (0-31) to mirror the physical hardware constraints.
+    // Add layout columns to existing databases (ignored silently if already present)
+    ['ALTER TABLE inventory ADD COLUMN x REAL',
+     'ALTER TABLE inventory ADD COLUMN y REAL',
+     'ALTER TABLE inventory ADD COLUMN zone TEXT DEFAULT \'A\'']
+        .forEach(sql => db.run(sql, err => {
+            if (err && !err.message.includes('duplicate column')) {
+                console.error('Migration error:', err.message);
+            }
+        }));
+
     const checkStmt = db.prepare("SELECT id FROM inventory WHERE id = ?");
     const insertStmt = db.prepare("INSERT INTO inventory (id, sku, name, quantity) VALUES (?, ?, ?, ?)");
 
     for (let i = 0; i < 32; i++) {
-        const currentId = i;
-        checkStmt.get(currentId, (err, row) => {
-            if (!row) {
-                insertStmt.run(currentId, `EMPTY-${currentId}`, `Slot ${currentId}`, 0);
-            }
+        checkStmt.get(i, (err, row) => {
+            if (!row) insertStmt.run(i, `EMPTY-${i}`, `Slot ${i}`, 0);
         });
     }
 
-    console.log("Database Schema Initialized and 32-node mapping verified.");
+    console.log("Schema ready.");
 });
 
 module.exports = db;

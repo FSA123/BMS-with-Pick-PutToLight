@@ -1,214 +1,509 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import './App.css';
 
-/**
- * @file App.js
- * @description WMS Dashboard for 32-node Pick-to-Light System.
- * Architecture: RESTful state management with a side-panel HMI.
- */
+const API = 'http://localhost:5000/api';
 
-const API_BASE = 'http://localhost:5000/api';
+const ZONES = {
+  A: { label: 'Zone A', color: '#3b82f6' },
+  B: { label: 'Zone B', color: '#10b981' },
+  C: { label: 'Zone C', color: '#f59e0b' },
+  D: { label: 'Zone D', color: '#ef4444' },
+  E: { label: 'Zone E', color: '#8b5cf6' },
+  F: { label: 'Zone F', color: '#ec4899' },
+};
+
+const isSlotEmpty = (item) => item.sku?.startsWith('EMPTY-');
+
+const defaultPos = (id) => ({
+  x: 3 + (id % 8) * 12,
+  y: 8 + Math.floor(id / 8) * 22,
+});
+
+const getPos = (item) =>
+  item.x != null && item.y != null ? { x: item.x, y: item.y } : defaultPos(item.id);
 
 function App() {
-  // --- SYSTEM STATE ---
-  const [inventory, setInventory] = useState([]);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [selectedSlot, setSelectedSlot] = useState(null);
-  const [activePickId, setActivePickId] = useState(null);
-  
-  // --- FORM STATE ---
-  const [isEditing, setIsEditing] = useState(false);
-  const [formData, setFormData] = useState({ name: '', sku: '', quantity: 0 });
+  const [inventory, setInventory]         = useState([]);
+  const [isEditMode, setIsEditMode]       = useState(false);
+  const [selectedSlot, setSelectedSlot]   = useState(null);
+  const [isEditing, setIsEditing]         = useState(false);
+  const [formData, setFormData]           = useState({ name: '', sku: '', quantity: 0 });
+  const [activePickId, setActivePickId]   = useState(null);
+  const [searchQuery, setSearchQuery]     = useState('');
 
-  // --- INITIALIZATION ---
+  // custom quantity state
+  const [customQtyOpen, setCustomQtyOpen] = useState(false);
+  const [customQty,     setCustomQty]     = useState('');
+  const [pickError,     setPickError]     = useState('');
+
+  const inventoryRef = useRef([]);
+  const mapRef       = useRef(null);
+  const customQtyRef = useRef(null);
+
+  useEffect(() => { fetchInventory(); }, []);
+  useEffect(() => { inventoryRef.current = inventory; }, [inventory]);
+
+  // reset custom qty state whenever the selected slot changes
   useEffect(() => {
-    fetchInventory();
-  }, []);
+    setCustomQtyOpen(false);
+    setCustomQty('');
+    setPickError('');
+  }, [selectedSlot?.id]);
+
+  // focus the custom qty input when it opens
+  useEffect(() => {
+    if (customQtyOpen && customQtyRef.current) customQtyRef.current.focus();
+  }, [customQtyOpen]);
 
   const fetchInventory = async () => {
     try {
-      const response = await axios.get(`${API_BASE}/inventory`);
-      setInventory(response.data);
-    } catch (err) {
-      console.error("Communication failure with persistence layer.");
+      const res = await axios.get(`${API}/inventory`);
+      setInventory(res.data);
+      setSelectedSlot(prev =>
+        prev ? res.data.find(s => s.id === prev.id) ?? prev : null
+      );
+    } catch {
+      console.error('Failed to reach backend.');
     }
   };
 
-  // --- CRUD OPERATIONS ---
+  // ── DRAG ──────────────────────────────────────────────────────────────────
+  const handleSlotMouseDown = (e, item) => {
+    if (!isEditMode) return;
+    e.preventDefault();
+    e.stopPropagation();
 
-  // Adds or Updates object metadata for a specific physical ID
+    const map = mapRef.current;
+    if (!map) return;
+    const rect = map.getBoundingClientRect();
+    const orig = getPos(item);
+
+    const state = {
+      id: item.id,
+      startX: e.clientX, startY: e.clientY,
+      origX: orig.x,     origY: orig.y,
+      mapW: rect.width,  mapH: rect.height,
+      curX: orig.x,      curY: orig.y,
+    };
+
+    const onMove = (ev) => {
+      const dx = ((ev.clientX - state.startX) / state.mapW) * 100;
+      const dy = ((ev.clientY - state.startY) / state.mapH) * 100;
+      state.curX = Math.max(0, Math.min(91, state.origX + dx));
+      state.curY = Math.max(0, Math.min(88, state.origY + dy));
+      setInventory(prev =>
+        prev.map(s => s.id === state.id ? { ...s, x: state.curX, y: state.curY } : s)
+      );
+    };
+
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+
+      const movedPx = Math.hypot(
+        (state.curX - state.origX) * state.mapW / 100,
+        (state.curY - state.origY) * state.mapH / 100
+      );
+
+      if (movedPx < 5) {
+        // click — open the side panel for editing
+        const latest = inventoryRef.current.find(s => s.id === state.id) ?? item;
+        setSelectedSlot(latest);
+        setFormData({ name: latest.name, sku: latest.sku, quantity: latest.quantity });
+        setIsEditing(isSlotEmpty(latest)); // auto-open form for empty slots
+      } else {
+        // drag — save new position
+        const latest = inventoryRef.current.find(s => s.id === state.id);
+        axios.post(`${API}/slots/position`, {
+          id: state.id, x: state.curX, y: state.curY, zone: latest?.zone || 'A',
+        }).catch(console.error);
+      }
+    };
+
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
+
+  // ── ZONE ──────────────────────────────────────────────────────────────────
+  const handleZoneChange = (id, zone) => {
+    const item = inventoryRef.current.find(s => s.id === id);
+    const pos  = getPos(item);
+    setInventory(prev => prev.map(s => s.id === id ? { ...s, zone } : s));
+    axios.post(`${API}/slots/position`, { id, x: pos.x, y: pos.y, zone }).catch(console.error);
+  };
+
+  // ── CRUD ──────────────────────────────────────────────────────────────────
   const handleSaveObject = async (e) => {
     e.preventDefault();
+    const name = formData.name.trim();
+    if (!name) { alert('Name is required.'); return; }
+    const sku = formData.sku.trim() || `SKU-${selectedSlot.id}`;
     try {
-      await axios.post(`${API_BASE}/slots/update`, { 
-        ...formData, 
-        id: selectedSlot.id 
+      await axios.post(`${API}/slots/update`, {
+        id: selectedSlot.id, name, sku, quantity: Number(formData.quantity),
       });
       setIsEditing(false);
       await fetchInventory();
-      // Sync local panel state
-      setSelectedSlot({ ...selectedSlot, ...formData });
     } catch (err) {
-      alert("Error updating database record.");
+      alert(err?.response?.data?.error || 'Save failed.');
     }
   };
 
-  // Clears metadata from a slot (Removing an object)
   const handleRemoveObject = async (id) => {
-    if (window.confirm(`Warning: Purge metadata for Slot ${id}?`)) {
-      try {
-        await axios.post(`${API_BASE}/slots/remove`, { id });
-        await fetchInventory();
-        setSelectedSlot(null);
-      } catch (err) {
-        alert("Error during object removal.");
-      }
+    if (!window.confirm(`Reset Slot ${id} to empty?`)) return;
+    try {
+      await axios.post(`${API}/slots/remove`, { id });
+      await fetchInventory();
+      setSelectedSlot(null);
+    } catch {
+      alert('Remove failed.');
     }
   };
 
-  // --- HARDWARE ACTUATION ---
-
-  // Triggers the physical LED and updates database count
+  // ── SINGLE PICK / PUT ─────────────────────────────────────────────────────
   const handleAction = async (id, type) => {
+    const target = inventoryRef.current.find(s => s.id === id);
+    if (!target) return;
+    if (type === 'PICK' && target.quantity <= 0) { alert('Slot is empty.'); return; }
+    const next = target.quantity + (type === 'PICK' ? -1 : 1);
+    setInventory(prev => prev.map(s => s.id === id ? { ...s, quantity: next } : s));
+    setSelectedSlot(prev => prev?.id === id ? { ...prev, quantity: next } : prev);
     try {
-      await axios.post(`${API_BASE}/action`, { id, type });
+      await axios.post(`${API}/action`, { id, type });
       if (type === 'PICK') {
         setActivePickId(id);
-        // Visual timeout for the "Glow" effect
         setTimeout(() => setActivePickId(null), 4000);
       }
-      fetchInventory();
-    } catch (err) {
-      console.error("Hardware trigger failed.");
+    } catch {
+      await fetchInventory();
+      alert('Action failed. Inventory refreshed.');
     }
   };
 
-  // --- FILTERING LOGIC ---
-  const filteredInventory = inventory.filter(item =>
-    item.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    item.sku.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  // ── BULK PICK / PUT ───────────────────────────────────────────────────────
+  const handleBulkAction = async (type) => {
+    const qty    = parseInt(customQty, 10);
+    const target = inventoryRef.current.find(s => s.id === selectedSlot?.id);
+    if (!target) return;
+    if (!qty || qty <= 0) {
+      setPickError('Enter a quantity greater than 0.');
+      return;
+    }
+    if (type === 'PICK' && qty > target.quantity) {
+      setPickError(`Only ${target.quantity} in stock — cannot pick ${qty}.`);
+      return;
+    }
+    setPickError('');
+    const change = type === 'PICK' ? -qty : qty;
+    const next   = target.quantity + change;
+    setInventory(prev => prev.map(s => s.id === target.id ? { ...s, quantity: next } : s));
+    setSelectedSlot(prev => prev?.id === target.id ? { ...prev, quantity: next } : prev);
+    try {
+      await axios.post(`${API}/action/bulk`, { id: target.id, type, quantity: qty });
+      if (type === 'PICK') {
+        setActivePickId(target.id);
+        setTimeout(() => setActivePickId(null), 4000);
+      }
+      setCustomQtyOpen(false);
+      setCustomQty('');
+    } catch (err) {
+      await fetchInventory();
+      setPickError(err?.response?.data?.error || 'Action failed.');
+    }
+  };
+
+  const enterEditMode = () => { setIsEditMode(true);  setSelectedSlot(null); setIsEditing(false); };
+  const exitEditMode  = () => { setIsEditMode(false); setSelectedSlot(null); };
+
+  // ── FILTER ─────────────────────────────────────────────────────────────────
+  const q = searchQuery.toLowerCase();
+  const filteredIds = q
+    ? new Set(inventory.filter(s =>
+        s.name.toLowerCase().includes(q) || s.sku.toLowerCase().includes(q)
+      ).map(s => s.id))
+    : null;
 
   return (
-    <div className="app-container">
-      {/* 1. TOP NAVIGATION BAR */}
-      <header className="top-bar">
-        <div className="brand">BMS | 32-NODE ARCHITECT</div>
-        <div className="search-box">
-          <input 
-            type="text" 
-            placeholder="Search by Object Name or SKU..." 
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-          />
+    <div className="app">
+
+      {/* ── TOP BAR ── */}
+      <header className="topbar">
+        <div className="topbar-left">
+          <div className="brand">
+            <svg className="brand-icon" viewBox="0 0 24 24" fill="none">
+              <polygon points="12,2 22,7 22,17 12,22 2,17 2,7" stroke="currentColor" strokeWidth="1.5" fill="none"/>
+              <circle cx="12" cy="12" r="3" fill="currentColor"/>
+            </svg>
+            PICK·LIGHT
+          </div>
+          <div className="search-wrap">
+            <svg className="search-icon" viewBox="0 0 20 20" fill="currentColor">
+              <path fillRule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clipRule="evenodd"/>
+            </svg>
+            <input
+              className="search-input"
+              type="text"
+              placeholder="Search name or SKU…"
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+            />
+            {searchQuery && (
+              <button className="search-clear" onClick={() => setSearchQuery('')}>✕</button>
+            )}
+          </div>
         </div>
-        <div className="status-badge">
-          <span className="dot"></span> SYSTEM ONLINE
+
+        <div className="topbar-right">
+          <div className="sys-status">
+            <span className="pulse-dot" />
+            SYSTEM ONLINE
+          </div>
+          <button
+            className={`mode-btn ${isEditMode ? 'mode-btn--active' : ''}`}
+            onClick={isEditMode ? exitEditMode : enterEditMode}
+          >
+            {isEditMode
+              ? <><span className="mode-btn-icon">✓</span> Done Editing</>
+              : <><span className="mode-btn-icon">⊹</span> Edit Layout</>}
+          </button>
         </div>
       </header>
 
-      <main className="main-content">
-        {/* 2. PHYSICAL 32-NODE GRID */}
-        <section className="grid-area">
-          <div className="grid-32">
-            {filteredInventory.map(item => {
-              const isEmpty = item.name === 'Empty Slot' || item.sku === 'N/A';
-              return (
-                <div 
-                  key={item.id} 
-                  className={`slot-rect 
-                    ${activePickId === item.id ? 'glow-pick' : ''} 
-                    ${selectedSlot?.id === item.id ? 'selected' : ''} 
-                    ${isEmpty ? 'is-empty' : 'is-occupied'}`
-                  }
-                  onClick={() => {
-                    setSelectedSlot(item);
-                    setFormData({ name: item.name, sku: item.sku, quantity: item.quantity });
-                    setIsEditing(false);
-                  }}
-                >
-                  <div className="slot-id-label">{item.id}</div>
-                  <div className="slot-name-label">{isEmpty ? "FREE" : item.name}</div>
-                </div>
-              );
-            })}
-          </div>
-        </section>
+      {/* ── WORKSPACE ── */}
+      <div className="workspace">
 
-        {/* 3. INTERACTIVE DETAIL PANEL */}
-        {selectedSlot && (
-          <aside className="side-panel">
-            <button className="close-panel" onClick={() => setSelectedSlot(null)}>×</button>
-            <div className="panel-header">
-              <h2>Node Configuration</h2>
-              <p>Physical Address: 0x{selectedSlot.id.toString(16).toUpperCase()}</p>
-            </div>
-
-            {!isEditing ? (
-              <div className="view-mode">
-                <div className="data-field">
-                  <label>Object Identity</label>
-                  <p className="primary-text">{selectedSlot.name}</p>
-                </div>
-                <div className="data-field">
-                  <label>SKU (Stock Keeping Unit)</label>
-                  <p className="secondary-text">{selectedSlot.sku}</p>
-                </div>
-                <div className="data-field">
-                  <label>Inventory Level</label>
-                  <p className="qty-highlight">{selectedSlot.quantity}</p>
-                </div>
-
-                <div className="action-stack">
-                  <button className="btn-act pick" onClick={() => handleAction(selectedSlot.id, 'PICK')}>TRIGGER PICK</button>
-                  <button className="btn-act put" onClick={() => handleAction(selectedSlot.id, 'PUT')}>TRIGGER PUT</button>
-                  <div className="divider"></div>
-                  <button className="btn-mgmt edit" onClick={() => setIsEditing(true)}>EDIT / ADD OBJECT</button>
-                  <button className="btn-mgmt delete" onClick={() => handleRemoveObject(selectedSlot.id)}>REMOVE OBJECT</button>
-                </div>
+        {/* ── FLOOR MAP ── */}
+        <div
+          className={`floor-map ${isEditMode ? 'floor-map--edit' : ''}`}
+          ref={mapRef}
+        >
+          <div className="zone-legend">
+            {Object.entries(ZONES).map(([key, z]) => (
+              <div key={key} className="zone-legend-item">
+                <span className="zone-dot" style={{ background: z.color }} />
+                {z.label}
               </div>
-            ) : (
-              <form onSubmit={handleSaveObject} className="edit-form">
-                <div className="form-field">
-                  <label>Object Name</label>
-                  <input 
-                    type="text" 
-                    value={formData.name} 
-                      
-                    required 
-                  />
+            ))}
+          </div>
+
+          {isEditMode && (
+            <div className="edit-hint">
+              Drag bins to reposition · tap colour pips to assign zones
+            </div>
+          )}
+
+          {inventory.map(item => {
+            const pos      = getPos(item);
+            const empty    = isSlotEmpty(item);
+            const zone     = item.zone || 'A';
+            const zColor   = ZONES[zone]?.color ?? ZONES.A.color;
+            const isPick   = activePickId === item.id;
+            const isSel    = selectedSlot?.id === item.id;
+            const isDimmed = filteredIds && !filteredIds.has(item.id);
+            // hide empty slots in ops mode; show everything in edit mode
+            const isHidden = empty && !isEditMode;
+
+            return (
+              <div
+                key={item.id}
+                className={[
+                  'slot-card',
+                  empty    ? 'slot-card--empty'    : 'slot-card--occupied',
+                  isPick   ? 'slot-card--pick'     : '',
+                  isSel    ? 'slot-card--selected' : '',
+                  isDimmed ? 'slot-card--dimmed'   : '',
+                  isEditMode ? 'slot-card--drag'   : '',
+                  isHidden ? 'slot-card--hidden'   : '',
+                ].join(' ')}
+                style={{ left: `${pos.x}%`, top: `${pos.y}%`, '--zc': zColor, '--zc40': zColor + '40' }}
+                onMouseDown={e => handleSlotMouseDown(e, item)}
+                onClick={() => {
+                  if (isEditMode) return;
+                  setSelectedSlot(item);
+                  setFormData({ name: item.name, sku: item.sku, quantity: item.quantity });
+                  setIsEditing(false);
+                }}
+              >
+                <div className="slot-accent" style={{ background: zColor }} />
+                <div className="slot-id">#{item.id}</div>
+                <div className="slot-name">{empty ? 'EMPTY' : item.name}</div>
+                {!empty && <div className="slot-qty" style={{ color: zColor }}>{item.quantity}</div>}
+
+                {isEditMode && (
+                  <div className="zone-picker" onClick={e => e.stopPropagation()}>
+                    {Object.entries(ZONES).map(([key, z]) => (
+                      <button
+                        key={key}
+                        className={`zpip ${zone === key ? 'zpip--on' : ''}`}
+                        style={{ background: z.color }}
+                        title={z.label}
+                        onClick={() => handleZoneChange(item.id, key)}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {/* ── SIDE PANEL ── */}
+        {selectedSlot && (() => {
+          const slot   = selectedSlot;
+          const zone   = slot.zone || 'A';
+          const zColor = ZONES[zone]?.color ?? ZONES.A.color;
+          const empty  = isSlotEmpty(slot);
+          return (
+            <aside className="side-panel" key={slot.id}>
+              <div className="panel-top">
+                <div>
+                  <div className="panel-id">Slot #{slot.id}</div>
+                  <div className="panel-zone" style={{ background: zColor + '28', color: zColor, border: `1px solid ${zColor}55` }}>
+                    {ZONES[zone]?.label}
+                  </div>
                 </div>
-                <div className="form-field">
-                  <label>SKU</label>
-                  <input 
-                    type="text" 
-                    value={formData.sku} 
-                    onChange={(e) => setFormData({...formData, sku: e.target.value})} 
-                    required 
-                  />
-                </div>
-                <div className="form-field">
-                  <label>Quantity</label>
-                  <input 
-                    type="number" 
-                    value={formData.quantity} 
-                    onChange={(e) => {
-  const val = parseInt(e.target.value);
-  setFormData({ ...formData, quantity: isNaN(val) ? 0 : val });
-}}
-                    required 
-                  />
-                </div>
-                <div className="form-actions">
-                  <button type="submit" className="btn-act save">SAVE RECORD</button>
-                  <button type="button" className="btn-mgmt" onClick={() => setIsEditing(false)}>CANCEL</button>
-                </div>
-              </form>
-            )}
-          </aside>
-        )}
-      </main>
+                <button className="panel-close" onClick={() => { setSelectedSlot(null); setIsEditing(false); }}>
+                  <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16">
+                    <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd"/>
+                  </svg>
+                </button>
+              </div>
+
+              {!isEditing ? (
+                <>
+                  <div className="pstat">
+                    <div className="pstat-label">OBJECT</div>
+                    <div className="pstat-val">{slot.name}</div>
+                  </div>
+                  <div className="pstat">
+                    <div className="pstat-label">SKU</div>
+                    <div className="pstat-val pstat-val--mono">{slot.sku}</div>
+                  </div>
+                  <div className="pstat">
+                    <div className="pstat-label">QUANTITY</div>
+                    <div className="pstat-val pstat-val--big" style={{ color: zColor }}>{slot.quantity}</div>
+                  </div>
+
+                  {/* PICK / PUT + custom pick — ops mode only */}
+                  {!isEditMode && (
+                    <>
+                      <div className="panel-actions">
+                        <button className="act-btn act-btn--pick" onClick={() => handleAction(slot.id, 'PICK')}>
+                          <svg viewBox="0 0 20 20" fill="currentColor" width="13"><path fillRule="evenodd" d="M3 10a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd"/></svg>
+                          PICK
+                        </button>
+
+                        <button
+                          className={`custom-pick-btn ${customQtyOpen ? 'custom-pick-btn--open' : ''}`}
+                          title="Pick custom quantity"
+                          onClick={() => { setCustomQtyOpen(o => !o); setPickError(''); setCustomQty(''); }}
+                        >
+                          <svg viewBox="0 0 20 20" fill="currentColor" width="13" height="13">
+                            <path d="M6 10a2 2 0 11-4 0 2 2 0 014 0zM12 10a2 2 0 11-4 0 2 2 0 014 0zM16 12a2 2 0 100-4 2 2 0 000 4z"/>
+                          </svg>
+                        </button>
+
+                        <button className="act-btn act-btn--put" onClick={() => handleAction(slot.id, 'PUT')}>
+                          <svg viewBox="0 0 20 20" fill="currentColor" width="13"><path fillRule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clipRule="evenodd"/></svg>
+                          PUT
+                        </button>
+                      </div>
+
+                      {customQtyOpen && (
+                        <div className="custom-pick-form">
+                          <div className="cpf-label">Custom quantity</div>
+                          <div className="cpf-row">
+                            <input
+                              ref={customQtyRef}
+                              className="cpf-input"
+                              type="number"
+                              min="1"
+                              placeholder="0"
+                              value={customQty}
+                              onChange={e => { setCustomQty(e.target.value); setPickError(''); }}
+                              onKeyDown={e => e.key === 'Enter' && handleBulkAction('PICK')}
+                            />
+                            <button className="cpf-cancel" onClick={() => { setCustomQtyOpen(false); setPickError(''); }}>
+                              ✕
+                            </button>
+                          </div>
+                          <div className="cpf-actions">
+                            <button className="cpf-pick" onClick={() => handleBulkAction('PICK')}>
+                              − PICK {customQty || 'N'}
+                            </button>
+                            <button className="cpf-put" onClick={() => handleBulkAction('PUT')}>
+                              + PUT {customQty || 'N'}
+                            </button>
+                          </div>
+                          {pickError && (
+                            <div className="pick-error">
+                              <svg viewBox="0 0 20 20" fill="currentColor" width="12" height="12">
+                                <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd"/>
+                              </svg>
+                              {pickError}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </>
+                  )}
+
+                  <div className="panel-divider" />
+
+                  <div className="panel-mgmt">
+                    <button className="mgmt-btn" onClick={() => setIsEditing(true)}>
+                      {empty ? 'Add Object' : 'Edit Object'}
+                    </button>
+                    {!empty && (
+                      <button className="mgmt-btn mgmt-btn--danger" onClick={() => handleRemoveObject(slot.id)}>
+                        Remove Object
+                      </button>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <form className="edit-form" onSubmit={handleSaveObject}>
+                  <div className="fgroup">
+                    <label>Object Name</label>
+                    <input
+                      type="text"
+                      value={formData.name}
+                      onChange={e => setFormData({ ...formData, name: e.target.value })}
+                      placeholder="e.g. M8 Bolts"
+                      autoFocus
+                      required
+                    />
+                  </div>
+                  <div className="fgroup">
+                    <label>SKU <span className="flabel-hint">— optional</span></label>
+                    <input
+                      type="text"
+                      value={formData.sku}
+                      onChange={e => setFormData({ ...formData, sku: e.target.value })}
+                      placeholder={`SKU-${slot.id}`}
+                    />
+                  </div>
+                  <div className="fgroup">
+                    <label>Quantity</label>
+                    <input
+                      type="number"
+                      min="0"
+                      value={formData.quantity}
+                      onChange={e => setFormData({ ...formData, quantity: Math.max(0, parseInt(e.target.value) || 0) })}
+                      required
+                    />
+                  </div>
+                  <div className="form-btns">
+                    <button type="submit" className="act-btn act-btn--save" style={{ '--zc': zColor }}>Save</button>
+                    <button type="button" className="mgmt-btn" onClick={() => setIsEditing(false)}>Cancel</button>
+                  </div>
+                </form>
+              )}
+            </aside>
+          );
+        })()}
+      </div>
     </div>
   );
 }
