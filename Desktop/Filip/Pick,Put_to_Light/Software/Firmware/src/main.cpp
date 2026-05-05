@@ -44,6 +44,17 @@
 #define NUM_LEDS         (NUM_CHIPS * 8)  // 32 LEDs total (8 drains per chip)
 #define FLASH_INTERVAL   350        // milliseconds between flash ON/OFF toggles
 
+// ─── PHYSICAL BUTTON ─────────────────────────────────────────────────────────
+// One button for all bins. Wired between GPIO 4 and GND.
+// INPUT_PULLUP: pin reads HIGH at rest, LOW when pressed.
+// Pressing it tells the server to clear the active LED and advance the queue.
+#define PIN_BUTTON   4
+#define DEBOUNCE_MS  50
+
+bool          lastBtnState  = HIGH;
+unsigned long lastBtnChange = 0;
+// ─────────────────────────────────────────────────────────────────────────────
+
 // ─── LED STATE ────────────────────────────────────────────────────────────────
 // We track two independent bitmasks across the 32 LEDs.
 // A given LED should only be in one mask at a time.
@@ -122,13 +133,15 @@ void onWebSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
 
         case WStype_TEXT: {
             /*
-             * Expected JSON format from server.js:
-             *   { "mask": <int32>, "action": "PUT" | "PICK" }
+             * Two message types arrive from the server:
              *
-             * "mask" has exactly one bit set (bit N = LED N).
-             * Note: JavaScript's << operator returns a signed 32-bit int, so
-             * LED 31 arrives as -2147483648 in JSON. We read it as int32_t and
-             * reinterpret the bits as uint32_t so the correct bit is preserved.
+             * 1. LED command:  { "mask": <uint32>, "action": "PUT" | "PICK" | "OFF" }
+             *    mask has exactly one bit set (bit N = LED N).
+             *    Server normalises mask with >>> 0, so it is always a positive uint32 in JSON.
+             *
+             * 2. State sync:   { "type": "sync", "solid": <uint32>, "flash": <uint32> }
+             *    Sent immediately after connect/reconnect so LED state is restored
+             *    after a reboot without any operator intervention.
              */
             JsonDocument doc;
             DeserializationError err = deserializeJson(doc, payload, length);
@@ -137,10 +150,20 @@ void onWebSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
                 break;
             }
 
-            // Read mask as signed to correctly handle LED 31 (-2147483648 → 0x80000000).
-            int32_t  rawMask = doc["mask"].as<int32_t>();
-            uint32_t mask    = (uint32_t)rawMask;
-            const char* action = doc["action"] | "";  // default to empty string if missing
+            // ── State sync message ──────────────────────────────────────────
+            const char* msgType = doc["type"] | "";
+            if (strcmp(msgType, "sync") == 0) {
+                solidMask = doc["solid"].as<uint32_t>();
+                flashMask = doc["flash"].as<uint32_t>();
+                Serial.printf("[WS] State sync → solidMask=0x%08X  flashMask=0x%08X\n",
+                              solidMask, flashMask);
+                break;
+            }
+
+            // ── LED command message ─────────────────────────────────────────
+            // Server normalises mask with >>> 0 so it arrives as a positive uint32.
+            uint32_t    mask   = doc["mask"].as<uint32_t>();
+            const char* action = doc["action"] | "";
 
             if (mask == 0 || strlen(action) == 0) {
                 Serial.println("[WS] Received invalid payload (mask=0 or missing action).");
@@ -158,7 +181,7 @@ void onWebSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
             }
 
             if (strcmp(action, "PUT") == 0) {
-                // PUT: LED goes solid ON; remove it from flash mode if it was flashing.
+                // PUT: LED goes solid ON; remove from flash mode if it was flashing.
                 solidMask |=  mask;
                 flashMask &= ~mask;
                 Serial.printf("[WS] PUT  → LED %2d solid ON   "
@@ -166,17 +189,18 @@ void onWebSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
                               ledIndex, solidMask, flashMask);
 
             } else if (strcmp(action, "PICK") == 0) {
-                // PICK: LED starts flashing; remove it from solid mode if it was solid.
+                // PICK: LED starts flashing; remove from solid mode if it was solid.
                 flashMask |=  mask;
                 solidMask &= ~mask;
                 Serial.printf("[WS] PICK → LED %2d flashing   "
                               "(solidMask=0x%08X  flashMask=0x%08X)\n",
                               ledIndex, solidMask, flashMask);
 
-            } else if (strcmp(action, "CLEAR") == 0) {
+            } else if (strcmp(action, "OFF") == 0) {
+                // OFF: LED turns off completely — sent by "LED OFF" button or physical button.
                 solidMask &= ~mask;
                 flashMask &= ~mask;
-                Serial.printf("[WS] CLEAR → LED %2d OFF      "
+                Serial.printf("[WS] OFF  → LED %2d off        "
                               "(solidMask=0x%08X  flashMask=0x%08X)\n",
                               ledIndex, solidMask, flashMask);
 
@@ -225,6 +249,10 @@ void setup() {
 
     SPI.begin(PIN_SRCLK, /*MISO=*/-1, PIN_SER_IN, /*CS=*/-1);
 
+    // ── Button GPIO init ──
+    pinMode(PIN_BUTTON, INPUT_PULLUP);  // internal pull-up; button connects pin to GND
+    Serial.printf("[HW] Button configured on GPIO %d.\n", PIN_BUTTON);
+
     // Turn all 32 LEDs off on startup.
     applyLEDs(0x00000000);
     lastActiveMask = 0x00000000;
@@ -242,7 +270,8 @@ void setup() {
 
     // ── Connect to WebSocket server ──
     Serial.printf("[WS] Connecting to ws://%s:%d ...\n", SERVER_IP, SERVER_PORT);
-    ws.begin(SERVER_IP, SERVER_PORT, "/");
+    // /esp32 path lets the server distinguish ESP32 from browser WebSocket clients.
+    ws.begin(SERVER_IP, SERVER_PORT, "/esp32");
     ws.onEvent(onWebSocketEvent);
     ws.setReconnectInterval(3000);      // auto-reconnect after 3 s if disconnected
     ws.enableHeartbeat(15000, 3000, 2); // ping every 15 s; drop after 2 missed pongs
@@ -256,6 +285,22 @@ void loop() {
     // Must be called every iteration to receive WebSocket messages and keep
     // the connection alive (handles pings, reconnects, etc.).
     ws.loop();
+
+    // ── Physical button ──────────────────────────────────────────────────────
+    // Detect a falling edge (HIGH → LOW) with software debounce.
+    // On press: tell the server to clear the current LED and advance the queue.
+    {
+        bool btnNow = digitalRead(PIN_BUTTON);
+        unsigned long now = millis();
+        if (btnNow != lastBtnState && (now - lastBtnChange) > DEBOUNCE_MS) {
+            lastBtnChange = now;
+            lastBtnState  = btnNow;
+            if (btnNow == LOW) {  // falling edge = button pressed
+                ws.sendTXT("{\"type\":\"button_press\"}");
+                Serial.println("[BTN] Pressed — sent to server.");
+            }
+        }
+    }
 
     // ── Non-blocking flash timer ──
     // Every FLASH_INTERVAL ms, toggle the flash phase. flashPhase==true means

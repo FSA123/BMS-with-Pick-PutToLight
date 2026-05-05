@@ -2,7 +2,12 @@ import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import './App.css';
 
-const API = 'http://localhost:5000/api';
+// REACT_APP_SERVER_URL is set in dashboard/.env (or .env.local for per-machine overrides).
+// Default to localhost so the app works out-of-the-box without any config.
+const SERVER = process.env.REACT_APP_SERVER_URL || 'http://localhost:5000';
+const API    = `${SERVER}/api`;
+// Derive WebSocket URL from the server URL: http→ws, https→wss, append /browser path.
+const WS_URL = SERVER.replace(/^http/, 'ws') + '/browser';
 
 const ZONES = {
   A: { label: 'Zone A', color: '#3b82f6' },
@@ -31,6 +36,9 @@ function App() {
   const [formData, setFormData]           = useState({ name: '', sku: '', quantity: 0 });
   const [activePickId, setActivePickId]   = useState(null);
   const [searchQuery, setSearchQuery]     = useState('');
+  const [esp32Online, setEsp32Online]     = useState(false); // real hardware status from server
+  const [queueLength, setQueueLength]    = useState(0);     // pending LED actions waiting in queue
+  const [activeId,    setActiveId]       = useState(null);  // slot currently lit on hardware
 
   // custom quantity state
   const [customQtyOpen, setCustomQtyOpen] = useState(false);
@@ -40,6 +48,59 @@ function App() {
   const inventoryRef = useRef([]);
   const mapRef       = useRef(null);
   const customQtyRef = useRef(null);
+  const wsRef        = useRef(null);  // persistent WebSocket reference
+
+  // ── WebSocket connection to server ──────────────────────────────────────────
+  // Opened once on mount; server pushes inventory updates and ESP32 status.
+  // Reconnects automatically if the tab loses the connection.
+  useEffect(() => {
+    let reconnectTimer = null;
+
+    function connect() {
+      const ws = new WebSocket(WS_URL);
+      wsRef.current = ws;
+
+      ws.onopen = () => console.log('[WS] Connected to server.');
+
+      ws.onmessage = (event) => {
+        let msg;
+        try { msg = JSON.parse(event.data); } catch { return; }
+
+        if (msg.type === 'inventory_update') {
+          // A slot changed — update just that row without re-fetching everything.
+          setInventory(prev => prev.map(s => s.id === msg.slot.id ? msg.slot : s));
+          setSelectedSlot(prev => prev?.id === msg.slot.id ? msg.slot : prev);
+
+        } else if (msg.type === 'esp32_status') {
+          setEsp32Online(msg.connected);
+          console.log(`[WS] ESP32 ${msg.connected ? 'ONLINE' : 'OFFLINE'}`);
+
+        } else if (msg.type === 'queue_update') {
+          // Server queue changed — update the counter and highlight the active slot.
+          setQueueLength(msg.queueLength);
+          setActiveId(msg.activeId ?? null);
+
+        } else if (msg.type === 'led_cleared') {
+          // A physical button was pressed on the hardware, clearing a LED.
+          console.log(`[WS] LED ${msg.id} cleared by physical button.`);
+          if (activePickId === msg.id) setActivePickId(null);
+        }
+      };
+
+      ws.onclose = () => {
+        console.log('[WS] Disconnected — retrying in 3 s...');
+        reconnectTimer = setTimeout(connect, 3000);
+      };
+
+      ws.onerror = () => ws.close();  // triggers onclose which handles retry
+    }
+
+    connect();
+    return () => {
+      clearTimeout(reconnectTimer);
+      wsRef.current?.close();
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { fetchInventory(); }, []);
   useEffect(() => { inventoryRef.current = inventory; }, [inventory]);
@@ -107,13 +168,11 @@ function App() {
       );
 
       if (movedPx < 5) {
-        // click — open the side panel for editing
         const latest = inventoryRef.current.find(s => s.id === state.id) ?? item;
         setSelectedSlot(latest);
         setFormData({ name: latest.name, sku: latest.sku, quantity: latest.quantity });
-        setIsEditing(isSlotEmpty(latest)); // auto-open form for empty slots
+        setIsEditing(isSlotEmpty(latest));
       } else {
-        // drag — save new position
         const latest = inventoryRef.current.find(s => s.id === state.id);
         axios.post(`${API}/slots/position`, {
           id: state.id, x: state.curX, y: state.curY, zone: latest?.zone || 'A',
@@ -265,10 +324,20 @@ function App() {
         </div>
 
         <div className="topbar-right">
-          <div className="sys-status">
+          {/* Real-time ESP32 connection status — green when hardware is live, red when not */}
+          <div className={`sys-status ${esp32Online ? '' : 'sys-status--offline'}`}>
             <span className="pulse-dot" />
-            SYSTEM ONLINE
+            {esp32Online ? 'ESP32 ONLINE' : 'ESP32 OFFLINE'}
           </div>
+
+          {/* Queue counter — only visible when there are pending or active actions */}
+          {(queueLength > 0 || activeId !== null) && (
+            <div className="queue-badge" title="LED actions pending">
+              <span className="queue-badge__icon">▶</span>
+              {activeId !== null ? `Slot #${activeId} active` : ''}
+              {queueLength > 0 ? `  +${queueLength} in queue` : ''}
+            </div>
+          )}
           <button
             className={`mode-btn ${isEditMode ? 'mode-btn--active' : ''}`}
             onClick={isEditMode ? exitEditMode : enterEditMode}
@@ -311,20 +380,26 @@ function App() {
             const isPick   = activePickId === item.id;
             const isSel    = selectedSlot?.id === item.id;
             const isDimmed = filteredIds && !filteredIds.has(item.id);
-            // hide empty slots in ops mode; show everything in edit mode
             const isHidden = empty && !isEditMode;
+
+            // Low stock: quantity is low but not zero. Out of stock: quantity is 0 on an assigned slot.
+            const threshold  = item.min_threshold ?? 5;
+            const isLowStock = !empty && item.quantity > 0 && item.quantity <= threshold;
+            const isOutStock = !empty && item.quantity === 0;
 
             return (
               <div
                 key={item.id}
                 className={[
                   'slot-card',
-                  empty    ? 'slot-card--empty'    : 'slot-card--occupied',
-                  isPick   ? 'slot-card--pick'     : '',
-                  isSel    ? 'slot-card--selected' : '',
-                  isDimmed ? 'slot-card--dimmed'   : '',
-                  isEditMode ? 'slot-card--drag'   : '',
-                  isHidden ? 'slot-card--hidden'   : '',
+                  empty      ? 'slot-card--empty'    : 'slot-card--occupied',
+                  isPick     ? 'slot-card--pick'     : '',
+                  isSel      ? 'slot-card--selected' : '',
+                  isDimmed   ? 'slot-card--dimmed'   : '',
+                  isEditMode ? 'slot-card--drag'     : '',
+                  isHidden   ? 'slot-card--hidden'   : '',
+                  isLowStock ? 'slot-card--lowstock' : '',
+                  isOutStock ? 'slot-card--outstock' : '',
                 ].join(' ')}
                 style={{ left: `${pos.x}%`, top: `${pos.y}%`, '--zc': zColor, '--zc40': zColor + '40' }}
                 onMouseDown={e => handleSlotMouseDown(e, item)}
@@ -339,6 +414,14 @@ function App() {
                 <div className="slot-id">#{item.id}</div>
                 <div className="slot-name">{empty ? 'EMPTY' : item.name}</div>
                 {!empty && <div className="slot-qty" style={{ color: zColor }}>{item.quantity}</div>}
+
+                {/* Low stock / out of stock badge — shown in ops mode only */}
+                {!isEditMode && isLowStock && (
+                  <div className="stock-badge stock-badge--low" title={`Low stock (min: ${threshold})`}>!</div>
+                )}
+                {!isEditMode && isOutStock && (
+                  <div className="stock-badge stock-badge--out" title="Out of stock">0</div>
+                )}
 
                 {isEditMode && (
                   <div className="zone-picker" onClick={e => e.stopPropagation()}>
@@ -364,6 +447,9 @@ function App() {
           const zone   = slot.zone || 'A';
           const zColor = ZONES[zone]?.color ?? ZONES.A.color;
           const empty  = isSlotEmpty(slot);
+          const threshold  = slot.min_threshold ?? 5;
+          const isLowStock = !empty && slot.quantity > 0 && slot.quantity <= threshold;
+          const isOutStock = !empty && slot.quantity === 0;
           return (
             <aside className="side-panel" key={slot.id}>
               <div className="panel-top">
@@ -393,6 +479,17 @@ function App() {
                   <div className="pstat">
                     <div className="pstat-label">QUANTITY</div>
                     <div className="pstat-val pstat-val--big" style={{ color: zColor }}>{slot.quantity}</div>
+                    {/* Low / out-of-stock warning inline in the panel */}
+                    {isLowStock && (
+                      <div className="panel-stock-warn panel-stock-warn--low">
+                        Low stock — below minimum threshold of {threshold}
+                      </div>
+                    )}
+                    {isOutStock && (
+                      <div className="panel-stock-warn panel-stock-warn--out">
+                        Out of stock
+                      </div>
+                    )}
                   </div>
 
                   {/* PICK / PUT + custom pick — ops mode only */}

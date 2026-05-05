@@ -105,6 +105,17 @@ body {
   50%       { box-shadow: 0 0 0 5px rgba(16 185 129 / 0); }
 }
 
+/* ESP32 offline — red badge replaces the green one */
+.sys-status--offline { color: var(--red); }
+.sys-status--offline .pulse-dot {
+  background: var(--red);
+  animation: pulse-ring-red 2.5s ease-in-out infinite;
+}
+@keyframes pulse-ring-red {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(220 38 38 / 0.7); }
+  50%       { box-shadow: 0 0 0 5px rgba(220 38 38 / 0); }
+}
+
 .mode-btn {
   display: flex; align-items: center; gap: 6px;
   background: var(--surf2);
@@ -454,3 +465,55 @@ body {
 .fgroup input::placeholder { color: var(--text-dim); }
 
 .form-btns { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+
+/* ═══════════════════════════════════════
+   STOCK WARNINGS
+═══════════════════════════════════════ */
+
+/* Small corner badge on slot cards */
+.stock-badge {
+  position: absolute; top: 7px; right: 7px;
+  width: 17px; height: 17px; border-radius: 50%;
+  font-size: 0.6rem; font-weight: 800; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; pointer-events: none;
+}
+.stock-badge--low { background: #d97706; }  /* amber — low stock */
+.stock-badge--out { background: var(--red); } /* red   — out of stock */
+
+/* Subtle card border tint for low / out stock */
+.slot-card--lowstock { border-color: #d97706 !important; }
+.slot-card--outstock { border-color: var(--red) !important; }
+
+/* Inline warning text inside the side panel */
+.panel-stock-warn {
+  font-size: 0.7rem; font-weight: 600;
+  border-radius: 6px; padding: 5px 9px;
+  margin-top: 6px; line-height: 1.4;
+}
+.panel-stock-warn--low {
+  color: #92400e;
+  background: rgba(217 119 6 / 0.12);
+  border: 1px solid rgba(217 119 6 / 0.3);
+}
+.panel-stock-warn--out {
+  color: #991b1b;
+  background: rgba(220 38 38 / 0.08);
+  border: 1px solid rgba(220 38 38 / 0.22);
+}
+
+/* ═══════════════════════════════════════
+   QUEUE BADGE (topbar)
+═══════════════════════════════════════ */
+.queue-badge {
+  display: flex; align-items: center; gap: 6px;
+  background: rgba(37 99 235 / 0.1);
+  border: 1px solid rgba(37 99 235 / 0.3);
+  color: var(--blue);
+  border-radius: 8px;
+  padding: 5px 12px;
+  font-size: 0.7rem; font-weight: 700;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+}
+.queue-badge__icon { font-size: 0.55rem; }
