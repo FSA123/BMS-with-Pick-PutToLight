@@ -1,0 +1,16 @@
+# PlatformIO build artifacts
+Firmware/.pio/
+
+# Node.js dependencies
+Node.Js/node_modules/
+Node.Js/dashboard/node_modules/
+
+# SQLite database (runtime data, not source)
+Node.Js/warehouse_management.db
+
+# VS Code personal settings
+.vscode/
+
+# OS files
+Thumbs.db
+.DS_Store

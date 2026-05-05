@@ -151,4 +151,17 @@ app.post('/api/slots/position', (req, res) => {
     );
 });
 
+// 7. CLEAR LED (turn off without changing inventory)
+app.post('/api/action/clear', (req, res) => {
+    const { id } = req.body;
+    const parsedId = Number(id);
+    if (!Number.isInteger(parsedId) || parsedId < 0 || parsedId > 31) {
+        return res.status(400).json({ error: "Invalid slot ID." });
+    }
+    if (esp32Client) {
+        esp32Client.send(JSON.stringify({ mask: (1 << parsedId), action: 'CLEAR' }));
+    }
+    res.json({ success: true, id: parsedId });
+});
+
 server.listen(5000, () => console.log("Backend active on port 5000"));

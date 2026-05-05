@@ -325,6 +325,7 @@ body {
 .act-btn--pick  { background: var(--red); }
 .act-btn--put   { background: var(--green); }
 .act-btn--save  { background: var(--zc, var(--blue)); width: 100%; }
+.act-btn--off   { background: var(--text-mid); width: 100%; margin-top: 4px; }
 
 /* small "⋯" custom pick button between PICK and PUT */
 .custom-pick-btn {

@@ -181,6 +181,16 @@ function App() {
     }
   };
 
+  // ── CLEAR LED ────────────────────────────────────────────────────────────
+  const handleClearLed = async (id) => {
+    setActivePickId(null);
+    try {
+      await axios.post(`${API}/action/clear`, { id });
+    } catch {
+      console.error('Clear LED failed.');
+    }
+  };
+
   // ── BULK PICK / PUT ───────────────────────────────────────────────────────
   const handleBulkAction = async (type) => {
     const qty    = parseInt(customQty, 10);
@@ -409,6 +419,13 @@ function App() {
                           PUT
                         </button>
                       </div>
+
+                      <button className="act-btn act-btn--off" onClick={() => handleClearLed(slot.id)}>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="13" height="13">
+                          <path d="M18.36 6.64a9 9 0 1 1-12.73 0M12 2v10"/>
+                        </svg>
+                        LED OFF
+                      </button>
 
                       {customQtyOpen && (
                         <div className="custom-pick-form">

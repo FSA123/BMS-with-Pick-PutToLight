@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "Firmware"
+		},
+		{
+			"name": "Pick-to-Light",
+			"path": "../../../../Documents/PlatformIO/Projects/Pick-to-Light"
+		}
+	],
+	"settings": {
+		"git.ignoreLimitWarning": true
+	}
+}
