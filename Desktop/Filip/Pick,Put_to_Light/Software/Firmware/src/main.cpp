@@ -22,13 +22,13 @@
 
 // ─── USER CONFIGURATION ──────────────────────────────────────────────────────
 // TODO: Replace with your actual WiFi network name and password.
-#define WIFI_SSID    "SMARTTRANS"
-#define WIFI_PASS    "SmartTrans2021"
+#define WIFI_SSID    "Filip"
+#define WIFI_PASS    "12345678"
 
 // TODO: Replace with the IP address of the PC running the Node.js server.
 //       Open a terminal on that PC and run "ipconfig" (Windows) or "ip a" (Linux)
 //       to find the IPv4 address on your local network (e.g. 192.168.1.100).
-#define SERVER_IP    "192.168.100.173"
+#define SERVER_IP    "172.20.10.2"
 #define SERVER_PORT  5000
 // ─────────────────────────────────────────────────────────────────────────────
 

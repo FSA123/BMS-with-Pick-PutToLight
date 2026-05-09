@@ -205,7 +205,7 @@ app.post('/api/action', (req, res) => {
 
 // 3. UPDATE / ADD OBJECT
 app.post('/api/slots/update', (req, res) => {
-    const { id, name, sku, quantity } = req.body;
+    const { id, name, sku, quantity, description, datasheet_url, image_url, supplier_name, supplier_part, supplier_url } = req.body;
     const parsedId  = Number(id);
     const parsedQty = Number(quantity);
     const normalizedName = typeof name === 'string' ? name.trim() : '';
@@ -219,8 +219,21 @@ app.post('/api/slots/update', (req, res) => {
         return res.status(400).json({ error: "Quantity must be a non-negative integer." });
 
     db.run(
-        "UPDATE inventory SET name = ?, sku = ?, quantity = ? WHERE id = ?",
-        [normalizedName, normalizedSku, parsedQty, parsedId],
+        `UPDATE inventory
+         SET name=?, sku=?, quantity=?,
+             description=?, datasheet_url=?, image_url=?,
+             supplier_name=?, supplier_part=?, supplier_url=?
+         WHERE id=?`,
+        [
+            normalizedName, normalizedSku, parsedQty,
+            description    || '',
+            datasheet_url  || '',
+            image_url      || '',
+            supplier_name  || '',
+            supplier_part  || '',
+            supplier_url   || '',
+            parsedId,
+        ],
         function(err) {
             if (err) return res.status(500).json({ error: err.message });
             broadcastInventoryUpdate(parsedId);

@@ -26,15 +26,22 @@ db.serialize(() => {
         FOREIGN KEY (inventory_id) REFERENCES inventory(id)
     )`);
 
-    // Add layout columns to existing databases (ignored silently if already present)
-    ['ALTER TABLE inventory ADD COLUMN x REAL',
-     'ALTER TABLE inventory ADD COLUMN y REAL',
-     'ALTER TABLE inventory ADD COLUMN zone TEXT DEFAULT \'A\'']
-        .forEach(sql => db.run(sql, err => {
-            if (err && !err.message.includes('duplicate column')) {
-                console.error('Migration error:', err.message);
-            }
-        }));
+    // Add columns to existing databases (ignored silently if already present)
+    [
+        "ALTER TABLE inventory ADD COLUMN x REAL",
+        "ALTER TABLE inventory ADD COLUMN y REAL",
+        "ALTER TABLE inventory ADD COLUMN zone TEXT DEFAULT 'A'",
+        "ALTER TABLE inventory ADD COLUMN description TEXT DEFAULT ''",
+        "ALTER TABLE inventory ADD COLUMN datasheet_url TEXT DEFAULT ''",
+        "ALTER TABLE inventory ADD COLUMN image_url TEXT DEFAULT ''",
+        "ALTER TABLE inventory ADD COLUMN supplier_name TEXT DEFAULT ''",
+        "ALTER TABLE inventory ADD COLUMN supplier_part TEXT DEFAULT ''",
+        "ALTER TABLE inventory ADD COLUMN supplier_url TEXT DEFAULT ''",
+    ].forEach(sql => db.run(sql, err => {
+        if (err && !err.message.includes('duplicate column')) {
+            console.error('Migration error:', err.message);
+        }
+    }));
 
     const checkStmt = db.prepare("SELECT id FROM inventory WHERE id = ?");
     const insertStmt = db.prepare("INSERT INTO inventory (id, sku, name, quantity) VALUES (?, ?, ?, ?)");
